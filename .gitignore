@@ -1,4 +1,6 @@
 # clion and cmake output files
 .idea/
 cmake-build-*/
+build/
+img/
 
