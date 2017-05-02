@@ -147,33 +147,17 @@ static void fat_read(void *data, size_t size, fat_t *fat) {
 }
 
 
-static void fat_read_entry(fat_entry_t *entry, uint8_t *lfn, size_t *lfn_size, fat_t *fat) {
-    assert(entry != NULL);
-    assert(lfn != NULL);
-    assert(lfn_size != NULL);
+static void fat_seek(long pos, fat_t *fat) {
     assert(fat != NULL);
 
-    *lfn_size = 0;
-
-    do {
-        fat_read(entry, sizeof(fat_entry_t), fat);
-
-        if (entry->attributes == ATTR_LFN && (*lfn_size + LFN_MAX_ENTRY_CHARS <= LFN_MAX_SIZE)) {
-            const lfn_entry_t *lfn_entry = (lfn_entry_t *)entry;
-
-            //TODO improper LFN order
-            memcpy(lfn + *lfn_size, lfn_entry->name_part1, sizeof(lfn_entry->name_part1));
-            *lfn_size += sizeof(lfn_entry->name_part1);
-            memcpy(lfn + *lfn_size, lfn_entry->name_part2, sizeof(lfn_entry->name_part2));
-            *lfn_size += sizeof(lfn_entry->name_part2);
-            memcpy(lfn + *lfn_size, lfn_entry->name_part3, sizeof(lfn_entry->name_part3));
-            *lfn_size += sizeof(lfn_entry->name_part3);
-        }
-    } while (entry->attributes == ATTR_LFN);
+    if (fseek(fat->img, pos, SEEK_SET)) {
+        perror("Error while seeking a FAT image");
+        exit(EXIT_FAILURE);
+    }
 }
 
 
-static void lfn_put_entry(const void *buffer, size_t buffer_size, wchar_t lfn[], size_t *start_idx) {
+static void lfn_put_data(const void *buffer, size_t buffer_size, wchar_t lfn[], size_t *start_idx) {
     const uint16_t *lfn_char = buffer;
     size_t count = buffer_size / sizeof(uint16_t);
     size_t end_idx = *start_idx + count;
@@ -187,7 +171,7 @@ static void lfn_put_entry(const void *buffer, size_t buffer_size, wchar_t lfn[],
 }
 
 
-static void fat_read_entry2(fat_entry_t *entry, wchar_t *lfn, fat_t *fat) {
+static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, fat_t *fat) {
     assert(entry != NULL);
     assert(lfn != NULL);
     assert(fat != NULL);
@@ -204,9 +188,9 @@ static void fat_read_entry2(fat_entry_t *entry, wchar_t *lfn, fat_t *fat) {
             if (lfn_entry->sequence_num != LFN_DELETED_ENTRY && seqnum <= LFN_MAX_ENTRIES && seqnum > 0) {
                 size_t idx = (size_t)(seqnum - 1) * LFN_CHARS_PER_ENTRY;
 
-                lfn_put_entry(lfn_entry->name_part1, sizeof(lfn_entry->name_part1), lfn, &idx);
-                lfn_put_entry(lfn_entry->name_part2, sizeof(lfn_entry->name_part2), lfn, &idx);
-                lfn_put_entry(lfn_entry->name_part3, sizeof(lfn_entry->name_part3), lfn, &idx);
+                lfn_put_data(lfn_entry->name_part1, sizeof(lfn_entry->name_part1), lfn, &idx);
+                lfn_put_data(lfn_entry->name_part2, sizeof(lfn_entry->name_part2), lfn, &idx);
+                lfn_put_data(lfn_entry->name_part3, sizeof(lfn_entry->name_part3), lfn, &idx);
             }
 
         }
@@ -237,51 +221,16 @@ static void fat_enter_dir(dir_t *dir) {
     long pos = get_cluster_pos(dir->entry.start_cluster, dir->fat);
 
     dir->prev_pos = ftell(dir->fat->img);
-    fseek(dir->fat->img, pos, SEEK_SET);
+    fat_seek(pos, dir->fat);
 }
 
 
 static void fat_leave_dir(dir_t *dir) {
-    fseek(dir->fat->img, dir->prev_pos, SEEK_SET);
+    fat_seek(dir->prev_pos, dir->fat);
 }
 
 
-static void print_path_indent() {
-    for (int i = 1; i < g_path_depth; i++) {
-        printf("    ");
-    }
-    printf("+-- ");
-}
-
-
-static void print_entry_name(fat_entry_t *entry, const uint8_t *lfn, size_t lfn_size) {
-//    if (1) {
-    if (lfn_size == 0) {
-        // Remove trailing spaces from the filename
-        for (size_t i = (sizeof(entry->filename) - 1); i >= 0 && isspace(entry->filename[i]); i--) {
-            entry->filename[i] = '\0';
-        }
-
-        if (fat_entry_is_dir(entry)) {
-            printf("%.11s", entry->filename);
-        } else {
-            printf("%.8s.%.3s", entry->filename, entry->ext);
-        }
-    } else {
-        const uint16_t *wc = (uint16_t *)lfn;
-
-        while (lfn_size -= 2) {
-            putwchar(*wc++);
-        }
-    }
-
-    if (fat_entry_is_dir(entry)) {
-        putchar('\\');
-    }
-}
-
-
-static void print_entry_name2(fat_entry_t *entry, const wchar_t *lfn) {
+static void print_entry_name(fat_entry_t *entry, const wchar_t *lfn) {
     for (int i = 1; i < g_path_depth; i++) {
         printf("    ");
     }
@@ -304,38 +253,9 @@ static void print_entry_name2(fat_entry_t *entry, const wchar_t *lfn) {
     if (fat_entry_is_dir(entry)) {
         putchar('\\');
     }
+
+    putchar('\n');
 }
-
-
-//void print_dir(dir_t *dir) {
-//    fat_entry_t entry;
-//    uint8_t     lfn[LFN_MAX_SIZE];
-//    size_t      lfn_size = 0;
-//
-//    fat_enter_dir(dir);
-//    g_path_depth++;
-//
-//    do {
-//        fat_read_entry(&entry, lfn, &lfn_size, dir->fat);
-//
-//        if (fat_entry_is_volume_id(&entry)) {
-//            printf("%.11s", entry.filename);
-//        } else if (fat_entry_is_dir(&entry)) {
-//            print_path_indent();
-//            print_entry_name(&entry, lfn, lfn_size);
-//            // dir_t subdir = ...
-//            //TODO print_dir(&subdir);
-//        } else {
-//            print_path_indent();
-//            print_entry_name(&entry, lfn, lfn_size);
-//        }
-//
-//        putchar('\n');
-//    } while (!fat_entry_is_empty(&entry));
-//
-//    fat_leave_dir(dir);
-//    g_path_depth--;
-//}
 
 
 void print_dir(dir_t *dir) {
@@ -346,19 +266,17 @@ void print_dir(dir_t *dir) {
     g_path_depth++;
 
     do {
-        fat_read_entry2(&entry, lfn, dir->fat);
+        fat_read_entry(&entry, lfn, dir->fat);
 
         if (fat_entry_is_volume_id(&entry)) {
-            printf("%.11s", entry.filename);
+            printf("%.11s\n", entry.filename);
         } else if (fat_entry_is_dir(&entry)) {
-            print_entry_name2(&entry, lfn);
+            print_entry_name(&entry, lfn);
             // dir_t subdir = ...
             //TODO print_dir(&subdir);
         } else {
-            print_entry_name2(&entry, lfn);
+            print_entry_name(&entry, lfn);
         }
-
-        putchar('\n');
     } while (!fat_entry_is_empty(&entry));
 
     fat_leave_dir(dir);
