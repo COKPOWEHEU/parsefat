@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include <errno.h>
 #include <wchar.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
 #include <stdbool.h>
-#include <ctype.h>
 
 
 // Boot sector
@@ -18,9 +18,6 @@
 #define ATTR_LFN                    0x0F
 
 // Long file names
-#define LFN_MAX_SIZE                512
-#define LFN_MAX_ENTRY_CHARS         26
-
 #define LFN_MAX_ENTRIES             20
 #define LFN_CHARS_PER_ENTRY         13
 #define LFN_BUFFER_LENGTH           (LFN_MAX_ENTRIES * LFN_CHARS_PER_ENTRY)
@@ -28,12 +25,15 @@
 #define LFN_SEQ_NUM_MASK            0x1F
 #define LFN_DELETED_ENTRY           0xE5
 
+#define VOLUME_LABEL_LENGTH         11
+
 
 typedef struct _fat_entry_t {
     uint8_t  filename[8];
     uint8_t  ext[3];
     uint8_t  attributes;
-    uint8_t  reserved[10];
+    uint8_t  reserved[8];
+    uint16_t start_cluster_high;
     uint16_t modify_time;
     uint16_t modify_date;
     uint16_t start_cluster;
@@ -203,13 +203,28 @@ static inline bool fat_entry_is_volume_id(const fat_entry_t *entry) {
 }
 
 
-static inline bool fat_entry_is_dir(const fat_entry_t *entry) {
-    return ((entry->attributes & ATTR_DIR) == ATTR_DIR);
+static inline bool fat_entry_is_empty(const fat_entry_t *entry) {
+    return ((entry->attributes == 0) && (*entry->filename == '\0'));
 }
 
 
-static inline bool fat_entry_is_empty(const fat_entry_t *entry) {
-    return ((entry->attributes == 0) && (*entry->filename == '\0'));
+static inline bool fat_entry_is_dir(const fat_entry_t *entry) {
+    return ((entry->attributes & ATTR_DIR) == ATTR_DIR && entry->attributes != ATTR_LFN);
+}
+
+
+static bool fat_entry_is_real_dir(const fat_entry_t *entry) {
+    const char *current = ". ";
+    const char *parrent = "..";
+
+    return (fat_entry_is_dir(entry) &&
+            memcmp(entry->filename, current, 2) &&
+            memcmp(entry->filename, parrent, 2));
+}
+
+
+static bool fat_entry_is_file(const fat_entry_t *entry) {
+    return ((entry->attributes & (ATTR_VOLUME_ID | ATTR_DIR)) == 0) && entry->filename[0] != '\0';
 }
 
 
@@ -218,7 +233,8 @@ static void fat_enter_dir(dir_t *dir) {
     assert(dir->fat != NULL);
     assert(fat_entry_is_dir(&dir->entry));
 
-    long pos = get_cluster_pos(dir->entry.start_cluster, dir->fat);
+    uint32_t cluster = dir->entry.start_cluster | ((uint32_t)dir->entry.start_cluster_high << 16);
+    long pos = get_cluster_pos(cluster, dir->fat);
 
     dir->prev_pos = ftell(dir->fat->img);
     fat_seek(pos, dir->fat);
@@ -230,6 +246,13 @@ static void fat_leave_dir(dir_t *dir) {
 }
 
 
+static void remove_trailing_spaces(uint8_t *str, size_t length) {
+    for (int i = (int)length - 1; i >= 0 && isspace(str[i]); i--) {
+        str[i] = '\0';
+    }
+}
+
+
 static void print_entry_name(fat_entry_t *entry, const wchar_t *lfn) {
     for (int i = 1; i < g_path_depth; i++) {
         printf("    ");
@@ -238,13 +261,10 @@ static void print_entry_name(fat_entry_t *entry, const wchar_t *lfn) {
     if (wcslen(lfn) > 0) {
         printf("%.255ls", lfn);
     } else {
-        // Remove trailing spaces from the filename
-        for (size_t i = (sizeof(entry->filename) - 1); i >= 0 && isspace(entry->filename[i]); i--) {
-            entry->filename[i] = '\0';
-        }
+        remove_trailing_spaces(entry->filename, sizeof(entry->filename));
 
         if (fat_entry_is_dir(entry)) {
-            printf("%.11s", entry->filename);
+            printf("%.8s", entry->filename);
         } else {
             printf("%.8s.%.3s", entry->filename, entry->ext);
         }
@@ -269,12 +289,17 @@ void print_dir(dir_t *dir) {
         fat_read_entry(&entry, lfn, dir->fat);
 
         if (fat_entry_is_volume_id(&entry)) {
-            printf("%.11s\n", entry.filename);
-        } else if (fat_entry_is_dir(&entry)) {
+            remove_trailing_spaces(entry.filename, VOLUME_LABEL_LENGTH);
+            printf("%.11s:\n\n", entry.filename);
+        } else if (fat_entry_is_real_dir(&entry)) {
+            dir_t subdir = {
+                    .fat = dir->fat,
+                    .entry = entry
+            };
+
             print_entry_name(&entry, lfn);
-            // dir_t subdir = ...
-            //TODO print_dir(&subdir);
-        } else {
+            print_dir(&subdir);
+        } else if (fat_entry_is_file(&entry)){
             print_entry_name(&entry, lfn);
         }
     } while (!fat_entry_is_empty(&entry));
