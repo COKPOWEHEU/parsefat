@@ -12,6 +12,8 @@
 // Boot sector
 #define FAT_SECTOR_SIZE_OFFSET      0x000Bu
 
+#define FAT_END_OF_CHAIN_VALUE      0x0FFFFFFFu
+
 // Attribute flags of FAT entry.
 #define ATTR_VOLUME_ID              (1 << 3)
 #define ATTR_DIR                    (1 << 4)
@@ -65,8 +67,11 @@ typedef struct _fat_t {
 
 
 typedef struct _dir_t {
-    fat_t* fat;
-    long   prev_pos;
+    fat_t*   fat;
+    bool     end_reached;
+    long     prev_pos;
+    long     cluster_end_pos;
+    uint32_t cluster;
     fat_entry_t entry;
 } dir_t;
 
@@ -125,7 +130,8 @@ static int fat_mount(const char *filename, fat_t *fat, dir_t *rootdir) {
     rootdir->fat = fat;
     rootdir->prev_pos = 0;
     rootdir->entry.attributes = ATTR_DIR;
-    rootdir->entry.start_cluster = fat->rootdir_first_cluster;
+    rootdir->entry.start_cluster = (uint16_t)fat->rootdir_first_cluster;
+    rootdir->entry.start_cluster_high = (uint16_t)(fat->rootdir_first_cluster >> 16);
 
     return 0;
 }
@@ -157,12 +163,35 @@ static void fat_seek(long pos, fat_t *fat) {
 }
 
 
+static uint32_t fat_get_next_cluster(uint32_t cluster, fat_t *fat) {
+    uint32_t next_cluster = 0;
+    long fat_pos = fat->fat_start * fat->sector_size;
+    long pos = (long)((cluster - 1) * sizeof(uint32_t)) + fat_pos;
+
+    fat_seek(pos, fat);
+    fat_read(&next_cluster, sizeof(uint32_t), fat);
+
+    return next_cluster;
+}
+
+
+static void dir_seek_to_cluster(uint32_t cluster, dir_t *dir) {
+    assert(dir != NULL);
+
+    long pos = get_cluster_pos(cluster, dir->fat);
+
+    dir->cluster = cluster;
+    dir->cluster_end_pos = pos + dir->fat->sector_size;
+    fat_seek(pos, dir->fat);
+}
+
+
 static void lfn_put_data(const void *buffer, size_t buffer_size, wchar_t lfn[], size_t *start_idx) {
     const uint16_t *lfn_char = buffer;
     size_t count = buffer_size / sizeof(uint16_t);
     size_t end_idx = *start_idx + count;
 
-    for (size_t i = *start_idx; i <= end_idx; i++) {
+    for (size_t i = *start_idx; i < end_idx; i++) {
         wchar_t wc = *lfn_char++;
         lfn[i] = (wc != LFN_UNUSED_CHAR) ? wc : L'\0';
     }
@@ -171,15 +200,15 @@ static void lfn_put_data(const void *buffer, size_t buffer_size, wchar_t lfn[], 
 }
 
 
-static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, fat_t *fat) {
+static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, dir_t *dir) {
     assert(entry != NULL);
     assert(lfn != NULL);
-    assert(fat != NULL);
+    assert(dir != NULL);
 
     memset(lfn, 0, sizeof(wchar_t[LFN_BUFFER_LENGTH]));
 
     do {
-        fat_read(entry, sizeof(fat_entry_t), fat);
+        fat_read(entry, sizeof(fat_entry_t), dir->fat);
 
         if (entry->attributes == ATTR_LFN) {
             const lfn_entry_t *lfn_entry = (lfn_entry_t *)entry;
@@ -193,8 +222,17 @@ static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, fat_t *fat) {
                 lfn_put_data(lfn_entry->name_part3, sizeof(lfn_entry->name_part3), lfn, &idx);
             }
 
+            if (ftell(dir->fat->img) == dir->cluster_end_pos) {
+                uint32_t next_cluster = fat_get_next_cluster(dir->cluster, dir->fat);
+                if (next_cluster != FAT_END_OF_CHAIN_VALUE) {
+                    dir_seek_to_cluster(next_cluster, dir);
+                } else {
+                    dir->end_reached = true;
+                }
+
+            }
         }
-    } while (entry->attributes == ATTR_LFN);
+    } while (entry->attributes == ATTR_LFN && !dir->end_reached);
 }
 
 
@@ -233,11 +271,11 @@ static void fat_enter_dir(dir_t *dir) {
     assert(dir->fat != NULL);
     assert(fat_entry_is_dir(&dir->entry));
 
-    uint32_t cluster = dir->entry.start_cluster | ((uint32_t)dir->entry.start_cluster_high << 16);
-    long pos = get_cluster_pos(cluster, dir->fat);
+    uint32_t start_cluster = dir->entry.start_cluster | ((uint32_t)dir->entry.start_cluster_high << 16);
 
+    dir->end_reached = false;
     dir->prev_pos = ftell(dir->fat->img);
-    fat_seek(pos, dir->fat);
+    dir_seek_to_cluster(start_cluster, dir);
 }
 
 
@@ -286,7 +324,7 @@ void print_dir(dir_t *dir) {
     g_path_depth++;
 
     do {
-        fat_read_entry(&entry, lfn, dir->fat);
+        fat_read_entry(&entry, lfn, dir);
 
         if (fat_entry_is_volume_id(&entry)) {
             remove_trailing_spaces(entry.filename, VOLUME_LABEL_LENGTH);
@@ -302,7 +340,7 @@ void print_dir(dir_t *dir) {
         } else if (fat_entry_is_file(&entry)){
             print_entry_name(&entry, lfn);
         }
-    } while (!fat_entry_is_empty(&entry));
+    } while (!fat_entry_is_empty(&entry) && !dir->end_reached);
 
     fat_leave_dir(dir);
     g_path_depth--;
