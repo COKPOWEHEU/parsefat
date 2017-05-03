@@ -10,7 +10,7 @@ The sample output of the program can be found [here](output.txt).
 * Ubuntu 16.04.4 LTS
 * GCC 5.4.0
 * GLIBC 2.23
-
+* CMake 3.5.1
 
 ### How to build and run the program
 
