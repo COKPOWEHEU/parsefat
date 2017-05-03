@@ -225,8 +225,10 @@ static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, dir_t *dir) {
             }
         }
 
+        // If cluster end has been reached, then move to the next cluster in chain
         if (ftell(dir->fat->img) == dir->cluster_end_pos) {
             uint32_t next_cluster = fat_get_next_cluster(dir->cluster, dir->fat);
+
             if (next_cluster != FAT_END_OF_CHAIN_VALUE) {
                 dir_seek_to_cluster(next_cluster, dir);
             } else {
@@ -300,8 +302,10 @@ static void print_entry_name(fat_entry_t *entry, const wchar_t *lfn) {
     }
 
     if (wcslen(lfn) > 0) {
+        // Long file name
         printf("%.255ls", lfn);
     } else {
+        // 8.3 file name
         remove_trailing_spaces(entry->filename, sizeof(entry->filename));
 
         if (fat_entry_is_dir(entry)) {
@@ -344,7 +348,6 @@ void print_dir(dir_t *dir) {
             print_entry_name(&entry, lfn);
         }
     } while (!fat_entry_is_empty(&entry) && !dir->end_reached);
-//    } while (!dir->end_reached);
 
     fat_leave_dir(dir);
     g_path_depth--;
