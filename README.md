@@ -1,24 +1,18 @@
-T3 embedded
-===========
+Parsefat
+--------
 
-Tested on
------------
+The `parsefat` program parses the FAT32 image file and prints the file and directory tree. 
+The sample output of the program can be found [here](output.txt).  
+
+
+### Tested on
 
 * Ubuntu 16.04.4 LTS
 * GCC 5.4.0
 * GLIBC 2.23
 
 
-Restrictions
-------------
-
-
-* TODO 
-
-
-How to build and run the program
---------------------------------
-
+### How to build and run the program
 
 1. Install CMake
 
@@ -33,6 +27,5 @@ How to build and run the program
     
 1. Run the example
 
-        ./parsefat ../img/disk.img
+        ./parsefat disk.img
         
-Sample output of the program can be found here **TODO**.
