@@ -61,6 +61,7 @@ typedef struct _fat_t {
     uint32_t sectors_num;
     uint8_t  sectors_per_cluster;
     uint32_t fat_start;
+    uint32_t cluster_size;
     uint32_t cluster_start_lba;
     uint32_t rootdir_first_cluster;
 } fat_t;
@@ -123,6 +124,7 @@ static int fat_mount(const char *filename, fat_t *fat, dir_t *rootdir) {
     }
 
     fat->fat_start = reserved_sectors_num;
+    fat->cluster_size = (uint32_t)fat->sector_size * fat->sectors_per_cluster;
     fat->cluster_start_lba = reserved_sectors_num + (fats_num * sectors_per_fat);
 
     // Set the root directory
@@ -166,7 +168,7 @@ static void fat_seek(long pos, fat_t *fat) {
 static uint32_t fat_get_next_cluster(uint32_t cluster, fat_t *fat) {
     uint32_t next_cluster = 0;
     long fat_pos = fat->fat_start * fat->sector_size;
-    long pos = (long)((cluster - 1) * sizeof(uint32_t)) + fat_pos;
+    long pos = (long)(cluster * sizeof(uint32_t)) + fat_pos;
 
     fat_seek(pos, fat);
     fat_read(&next_cluster, sizeof(uint32_t), fat);
@@ -181,7 +183,7 @@ static void dir_seek_to_cluster(uint32_t cluster, dir_t *dir) {
     long pos = get_cluster_pos(cluster, dir->fat);
 
     dir->cluster = cluster;
-    dir->cluster_end_pos = pos + dir->fat->sector_size;
+    dir->cluster_end_pos = pos + dir->fat->cluster_size;
     fat_seek(pos, dir->fat);
 }
 
@@ -221,15 +223,14 @@ static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, dir_t *dir) {
                 lfn_put_data(lfn_entry->name_part2, sizeof(lfn_entry->name_part2), lfn, &idx);
                 lfn_put_data(lfn_entry->name_part3, sizeof(lfn_entry->name_part3), lfn, &idx);
             }
+        }
 
-            if (ftell(dir->fat->img) == dir->cluster_end_pos) {
-                uint32_t next_cluster = fat_get_next_cluster(dir->cluster, dir->fat);
-                if (next_cluster != FAT_END_OF_CHAIN_VALUE) {
-                    dir_seek_to_cluster(next_cluster, dir);
-                } else {
-                    dir->end_reached = true;
-                }
-
+        if (ftell(dir->fat->img) == dir->cluster_end_pos) {
+            uint32_t next_cluster = fat_get_next_cluster(dir->cluster, dir->fat);
+            if (next_cluster != FAT_END_OF_CHAIN_VALUE) {
+                dir_seek_to_cluster(next_cluster, dir);
+            } else {
+                dir->end_reached = true;
             }
         }
     } while (entry->attributes == ATTR_LFN && !dir->end_reached);
@@ -262,7 +263,9 @@ static bool fat_entry_is_real_dir(const fat_entry_t *entry) {
 
 
 static bool fat_entry_is_file(const fat_entry_t *entry) {
-    return ((entry->attributes & (ATTR_VOLUME_ID | ATTR_DIR)) == 0) && entry->filename[0] != '\0';
+    return ((entry->attributes & (ATTR_VOLUME_ID | ATTR_DIR)) == 0) &&
+            entry->filename[0] != LFN_DELETED_ENTRY &&
+            entry->filename[0] != '\0';
 }
 
 
@@ -341,6 +344,7 @@ void print_dir(dir_t *dir) {
             print_entry_name(&entry, lfn);
         }
     } while (!fat_entry_is_empty(&entry) && !dir->end_reached);
+//    } while (!dir->end_reached);
 
     fat_leave_dir(dir);
     g_path_depth--;
