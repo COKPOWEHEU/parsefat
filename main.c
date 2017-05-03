@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <errno.h>
 #include <wchar.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -8,11 +7,6 @@
 #include <assert.h>
 #include <stdbool.h>
 
-
-// Boot sector
-#define FAT_SECTOR_SIZE_OFFSET      0x000Bu
-
-#define FAT_END_OF_CHAIN_VALUE      0x0FFFFFFFu
 
 // Attribute flags of FAT entry.
 #define ATTR_VOLUME_ID              (1 << 3)
@@ -28,6 +22,37 @@
 #define LFN_DELETED_ENTRY           0xE5
 
 #define VOLUME_LABEL_LENGTH         11
+#define END_OF_CHAIN                0x0FFFFFFFu
+
+
+typedef struct _boot_sector_t {
+    // Boot sector
+    uint8_t  jmp[3];
+    uint8_t  oem[8];
+
+    // DOS BIOS parameter block
+    uint16_t sector_size;
+    uint8_t  sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t  number_of_fats;
+    uint16_t root_dir_entries;
+    uint16_t total_sectors_short;
+    uint8_t  media_descriptor;
+    uint16_t _unused_fat_size_sectors;
+    uint16_t sectors_per_track;
+    uint16_t number_of_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors_long;
+
+    // FAT32 extended BPB
+    uint32_t sectors_per_fat;
+    uint16_t drive_description;
+    uint16_t version;
+    uint32_t root_dir_start_cluster;
+    uint16_t info_sector;
+    uint16_t bs_copy_sector;
+    uint8_t  reserved[38];
+} __attribute((packed)) boot_sector_t;
 
 
 typedef struct _fat_entry_t {
@@ -58,7 +83,6 @@ typedef struct _lfn_entry_t {
 typedef struct _fat_t {
     FILE*    img;
     uint16_t sector_size;
-    uint32_t sectors_num;
     uint8_t  sectors_per_cluster;
     uint32_t fat_start;
     uint32_t cluster_size;
@@ -90,60 +114,6 @@ static inline uint32_t get_cluster_pos(uint32_t cluster_number, const fat_t *fat
 }
 
 
-static int fat_mount(const char *filename, fat_t *fat, dir_t *rootdir) {
-    assert(filename != NULL);
-    assert(fat != NULL);
-
-    uint8_t  fats_num = 0;
-    uint16_t reserved_sectors_num = 0;
-    uint32_t sectors_per_fat = 0;
-
-    fat->img = fopen(filename, "rb");
-    if (fat->img == NULL) {
-        return errno;
-    }
-
-    //TODO replace it with struct
-    fseek(fat->img, FAT_SECTOR_SIZE_OFFSET, SEEK_SET);
-    fread(&fat->sector_size, sizeof(fat->sector_size), 1, fat->img);
-    fread(&fat->sectors_per_cluster, sizeof(fat->sectors_per_cluster), 1, fat->img);
-    fread(&reserved_sectors_num, sizeof(reserved_sectors_num), 1, fat->img);
-    fread(&fats_num, sizeof(fats_num), 1, fat->img);
-    fseek(fat->img, 0x24, SEEK_SET);
-    fread(&sectors_per_fat, sizeof(sectors_per_fat), 1, fat->img);
-    fseek(fat->img, 0x2C, SEEK_SET);
-    fread(&fat->rootdir_first_cluster, sizeof(fat->rootdir_first_cluster), 1, fat->img);
-
-
-    fat->sectors_num = 0;
-    fseek(fat->img, 0x13, SEEK_SET);
-    fread(&fat->sectors_num, 2, 1, fat->img);
-    if (fat->sectors_num == 0) {
-        fseek(fat->img, 0x20, SEEK_SET);
-        fread(&fat->sectors_num, 4, 1, fat->img);
-    }
-
-    fat->fat_start = reserved_sectors_num;
-    fat->cluster_size = (uint32_t)fat->sector_size * fat->sectors_per_cluster;
-    fat->cluster_start_lba = reserved_sectors_num + (fats_num * sectors_per_fat);
-
-    // Set the root directory
-    memset(rootdir, 0, sizeof(dir_t));
-    rootdir->fat = fat;
-    rootdir->prev_pos = 0;
-    rootdir->entry.attributes = ATTR_DIR;
-    rootdir->entry.start_cluster = (uint16_t)fat->rootdir_first_cluster;
-    rootdir->entry.start_cluster_high = (uint16_t)(fat->rootdir_first_cluster >> 16);
-
-    return 0;
-}
-
-
-static void fat_unmount(fat_t *fat) {
-    fclose(fat->img);
-}
-
-
 static void fat_read(void *data, size_t size, fat_t *fat) {
     assert(data != NULL);
     assert(fat != NULL);
@@ -162,6 +132,40 @@ static void fat_seek(long pos, fat_t *fat) {
         perror("Error while seeking a FAT image");
         exit(EXIT_FAILURE);
     }
+}
+
+
+static void fat_mount(const char *filename, fat_t *fat, dir_t *rootdir) {
+    assert(filename != NULL);
+    assert(fat != NULL);
+
+    boot_sector_t bs;
+
+    fat->img = fopen(filename, "rb");
+    if (fat->img == NULL) {
+        perror("Failed to mount FAT image");
+        exit(EXIT_FAILURE);
+    }
+
+    fat_read(&bs, sizeof(boot_sector_t), fat);
+    fat->sector_size = bs.sector_size;
+    fat->sectors_per_cluster = bs.sectors_per_cluster;
+    fat->rootdir_first_cluster = bs.root_dir_start_cluster;
+    fat->fat_start = bs.reserved_sectors;
+    fat->cluster_size = (uint32_t)fat->sector_size * fat->sectors_per_cluster;
+    fat->cluster_start_lba = fat->fat_start + bs.number_of_fats * bs.sectors_per_fat;
+
+    memset(rootdir, 0, sizeof(dir_t));
+    rootdir->fat = fat;
+    rootdir->prev_pos = 0;
+    rootdir->entry.attributes = ATTR_DIR;
+    rootdir->entry.start_cluster = (uint16_t)fat->rootdir_first_cluster;
+    rootdir->entry.start_cluster_high = (uint16_t)(fat->rootdir_first_cluster >> 16);
+}
+
+
+static void fat_unmount(fat_t *fat) {
+    fclose(fat->img);
 }
 
 
@@ -229,7 +233,7 @@ static void fat_read_entry(fat_entry_t *entry, wchar_t *lfn, dir_t *dir) {
         if (ftell(dir->fat->img) == dir->cluster_end_pos) {
             uint32_t next_cluster = fat_get_next_cluster(dir->cluster, dir->fat);
 
-            if (next_cluster != FAT_END_OF_CHAIN_VALUE) {
+            if (next_cluster != END_OF_CHAIN) {
                 dir_seek_to_cluster(next_cluster, dir);
             } else {
                 dir->end_reached = true;
@@ -363,14 +367,8 @@ int main(int argc, char *argv[]) {
     fat_t fat;
     dir_t rootdir;
 
-    int err = fat_mount(argv[1], &fat, &rootdir);
-    if (err) {
-        perror("Failed to mount FAT image");
-        exit(EXIT_FAILURE);
-    }
-
+    fat_mount(argv[1], &fat, &rootdir);
     print_dir(&rootdir);
-
     fat_unmount(&fat);
 
     exit(EXIT_SUCCESS);
