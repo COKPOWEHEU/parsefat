@@ -24,7 +24,7 @@
 #define VOLUME_LABEL_LENGTH         11
 #define END_OF_CHAIN                0x0FFFFFFFu
 
-
+#pragma pack(push, 1) //does not always pack without it
 typedef struct _boot_sector_t {
     // Boot sector
     uint8_t  jmp[3];
@@ -78,6 +78,7 @@ typedef struct _lfn_entry_t {
     uint16_t first_cluster;
     uint8_t  name_part3[4];
 } __attribute((packed)) lfn_entry_t;
+#pragma pack(pop)
 
 
 typedef struct _fat_t {
